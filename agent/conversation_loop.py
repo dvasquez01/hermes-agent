@@ -4404,6 +4404,28 @@ def run_conversation(
                                 if cost_result.status == "included" else None,
                                 model=agent.model,
                                 api_call_count=1,
+                                request_usage={
+                                    "provider": agent.provider,
+                                    "model": agent.model,
+                                    "task": "normal",
+                                    "event_type": (
+                                        "post_compression"
+                                        if int(getattr(agent.context_compressor, "compression_count", 0) or 0) > 0
+                                        else "normal"
+                                    ),
+                                    "prompt_tokens": canonical_usage.prompt_tokens,
+                                    "completion_tokens": canonical_usage.output_tokens,
+                                    "reasoning_tokens": canonical_usage.reasoning_tokens,
+                                    "cache_read_tokens": canonical_usage.cache_read_tokens,
+                                    "cache_write_tokens": canonical_usage.cache_write_tokens,
+                                    "cache_miss_tokens": canonical_usage.input_tokens,
+                                    "input_cost_usd": cost_result.input_cost_usd,
+                                    "output_cost_usd": cost_result.output_cost_usd,
+                                    "total_cost_usd": _cost_delta,
+                                    "compression_generation": int(
+                                        getattr(agent.context_compressor, "compression_count", 0) or 0
+                                    ),
+                                },
                             )
                         except Exception as e:
                             # Log token persistence failures so they're

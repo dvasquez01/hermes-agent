@@ -2395,6 +2395,39 @@ class ContextCompressor(ContextEngine):
         telemetry["middle_window_tokens"] = estimate_messages_tokens_rough(middle_messages)
         telemetry["protected_tail_tokens"] = estimate_messages_tokens_rough(tail_messages)
 
+    def _record_compression_request_usage(
+        self, response: Any, *, provider: str, model: str
+    ) -> None:
+        """Persist numeric usage for the summary API request, if available."""
+        session_db = getattr(self, "_session_db", None)
+        session_id = getattr(self, "_session_id", "") or ""
+        raw_usage = getattr(response, "usage", None)
+        if session_db is None or not session_id or raw_usage is None:
+            return
+        try:
+            from agent.usage_pricing import estimate_usage_cost, normalize_usage
+            usage = normalize_usage(raw_usage, provider=provider)
+            cost = estimate_usage_cost(model, usage, provider=provider, base_url=self.base_url)
+            session_db.record_request_usage(
+                session_id,
+                provider=provider,
+                model=model,
+                task="compression",
+                event_type="compression",
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.output_tokens,
+                reasoning_tokens=usage.reasoning_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_miss_tokens=usage.input_tokens,
+                input_cost_usd=cost.input_cost_usd,
+                output_cost_usd=cost.output_cost_usd,
+                total_cost_usd=cost.amount_usd,
+                compression_generation=int(getattr(self, "compression_count", 0) or 0),
+            )
+        except Exception:
+            logger.debug("compression request usage recording failed", exc_info=True)
+
     def _record_aux_compression_call(
         self,
         *,
@@ -5264,6 +5297,9 @@ This compaction should PRIORITISE preserving all information related to the focu
                     effective_aux_context=_aux_context,
                     phase_timings=_latency_info,
                 )
+            self._record_compression_request_usage(
+                response, provider=_aux_provider, model=_aux_model
+            )
             # ``_validate_llm_response`` only guarantees ``choices[0].message``
             # exists, not that it's an object with ``.content``. Some
             # OpenAI-compatible proxies / local backends return a dict- or

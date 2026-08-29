@@ -112,6 +112,7 @@ def record_aux_usage(
 
         model = str(getattr(response, "model", "") or "") or "unknown"
         estimated_cost = None
+        cost = None
         try:
             cost = estimate_usage_cost(
                 model, usage, provider=provider, base_url=base_url
@@ -133,6 +134,23 @@ def record_aux_usage(
             cache_write_tokens=usage.cache_write_tokens,
             reasoning_tokens=usage.reasoning_tokens,
             estimated_cost_usd=estimated_cost,
+        )
+        session_db.record_request_usage(
+            session_id,
+            provider=provider,
+            model=model,
+            task=task,
+            event_type=task,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            cache_miss_tokens=usage.input_tokens,
+            input_cost_usd=cost.input_cost_usd if cost is not None else None,
+            output_cost_usd=cost.output_cost_usd if cost is not None else None,
+            total_cost_usd=estimated_cost,
+            compression_generation=0,
         )
     except Exception:
         logger.debug("Aux usage recording failed (non-fatal)", exc_info=True)
