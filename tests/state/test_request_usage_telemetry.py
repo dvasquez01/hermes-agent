@@ -4,6 +4,8 @@ import sqlite3
 from types import SimpleNamespace
 
 from agent.context_compressor import ContextCompressor
+from agent.aux_accounting import reset_accounting_context, set_accounting_context
+from agent.auxiliary_client import _validate_llm_response
 from hermes_state import SCHEMA_VERSION, SessionDB
 
 
@@ -102,6 +104,68 @@ def test_compression_response_records_current_generation(tmp_path):
         db.close()
 
 
+def test_compression_validation_and_explicit_writer_produce_one_row(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", "cli")
+        response = SimpleNamespace(
+            model="deepseek-v4-flash",
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=5),
+            choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))],
+        )
+        compressor = ContextCompressor.__new__(ContextCompressor)
+        compressor._session_db = db
+        compressor._session_id = "s1"
+        compressor.base_url = ""
+        compressor.compression_count = 1
+        token = set_accounting_context(db, "s1")
+        try:
+            _validate_llm_response(response, task="compression", provider="deepseek")
+        finally:
+            reset_accounting_context(token)
+        compressor._record_compression_request_usage(
+            response, provider="deepseek", model="deepseek-v4-flash"
+        )
+        assert db._conn.execute(
+            "SELECT count(*) FROM request_usage WHERE session_id='s1'"
+        ).fetchone()[0] == 1
+        assert db._conn.execute(
+            "SELECT sum(api_call_count) FROM session_model_usage WHERE session_id='s1'"
+        ).fetchone()[0] == 1
+        row = db._conn.execute(
+            "SELECT task, event_type, compression_generation FROM request_usage"
+        ).fetchone()
+        assert tuple(row) == ("compression", "compression", 1)
+    finally:
+        db.close()
+
+
+def test_auxiliary_usage_and_request_telemetry_commit_atomically(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", "cli")
+        db.record_auxiliary_usage(
+            "s1", "title", model="m", billing_provider="p",
+            input_tokens=10, output_tokens=2, estimated_cost_usd=0.5,
+            request_usage={
+                "provider": "p", "model": "m", "task": "title",
+                "prompt_tokens": 10, "completion_tokens": 2,
+                "cache_miss_tokens": 10, "total_cost_usd": 0.5,
+            },
+        )
+        assert db._conn.execute(
+            "SELECT count(*) FROM request_usage WHERE session_id='s1'"
+        ).fetchone()[0] == 1
+        assert db._conn.execute(
+            "SELECT sum(api_call_count) FROM session_model_usage WHERE session_id='s1'"
+        ).fetchone()[0] == 1
+        assert db._conn.execute(
+            "SELECT sum(total_cost_usd) FROM request_usage WHERE session_id='s1'"
+        ).fetchone()[0] == 0.5
+    finally:
+        db.close()
+
+
 def test_compression_generations_are_explicit_and_multiple_boundaries_survive(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     try:
@@ -121,5 +185,64 @@ def test_compression_generations_are_explicit_and_multiple_boundaries_survive(tm
             "SELECT task, compression_generation FROM request_usage ORDER BY id"
         ).fetchall()
         assert [tuple(row) for row in rows] == sequence
+    finally:
+        db.close()
+
+
+def test_two_compressions_have_one_row_each_and_advance_generation(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", "cli")
+        compressor = ContextCompressor.__new__(ContextCompressor)
+        compressor._session_db = db
+        compressor._session_id = "s1"
+        compressor.base_url = ""
+        for generation in (0, 1):
+            response = SimpleNamespace(
+                model="deepseek-v4-flash",
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=5),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))],
+            )
+            compressor.compression_count = generation
+            token = set_accounting_context(db, "s1")
+            try:
+                _validate_llm_response(response, task="compression", provider="deepseek")
+            finally:
+                reset_accounting_context(token)
+            compressor._record_compression_request_usage(
+                response, provider="deepseek", model="deepseek-v4-flash"
+            )
+        rows = db._conn.execute(
+            "SELECT task, event_type, compression_generation FROM request_usage "
+            "ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("compression", "compression", 0),
+            ("compression", "compression", 1),
+        ]
+    finally:
+        db.close()
+
+
+def test_auxiliary_usage_rolls_back_both_writes_on_telemetry_failure(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", "cli")
+        try:
+            db.record_auxiliary_usage(
+                "s1", "title", model="m", billing_provider="p",
+                input_tokens=10, output_tokens=2, estimated_cost_usd=0.5,
+                request_usage={"prompt_tokens": 10, "compression_generation": "invalid"},
+            )
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AssertionError("invalid telemetry should fail")
+        assert db._conn.execute(
+            "SELECT count(*) FROM request_usage WHERE session_id='s1'"
+        ).fetchone()[0] == 0
+        assert db._conn.execute(
+            "SELECT count(*) FROM session_model_usage WHERE session_id='s1'"
+        ).fetchone()[0] == 0
     finally:
         db.close()

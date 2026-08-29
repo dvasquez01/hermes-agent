@@ -2408,22 +2408,38 @@ class ContextCompressor(ContextEngine):
             from agent.usage_pricing import estimate_usage_cost, normalize_usage
             usage = normalize_usage(raw_usage, provider=provider)
             cost = estimate_usage_cost(model, usage, provider=provider, base_url=self.base_url)
-            session_db.record_request_usage(
+            session_db.record_auxiliary_usage(
                 session_id,
-                provider=provider,
+                "compression",
                 model=model,
-                task="compression",
-                event_type="compression",
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.output_tokens,
-                reasoning_tokens=usage.reasoning_tokens,
+                billing_provider=provider,
+                billing_base_url=self.base_url,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
                 cache_read_tokens=usage.cache_read_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
-                cache_miss_tokens=usage.input_tokens,
-                input_cost_usd=cost.input_cost_usd,
-                output_cost_usd=cost.output_cost_usd,
-                total_cost_usd=cost.amount_usd,
-                compression_generation=int(getattr(self, "compression_count", 0) or 0),
+                reasoning_tokens=usage.reasoning_tokens,
+                estimated_cost_usd=(
+                    float(cost.amount_usd) if cost.amount_usd is not None else None
+                ),
+                request_usage={
+                    "provider": provider,
+                    "model": model,
+                    "task": "compression",
+                    "event_type": "compression",
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.output_tokens,
+                    "reasoning_tokens": usage.reasoning_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "cache_write_tokens": usage.cache_write_tokens,
+                    "cache_miss_tokens": usage.input_tokens,
+                    "input_cost_usd": cost.input_cost_usd,
+                    "output_cost_usd": cost.output_cost_usd,
+                    "total_cost_usd": cost.amount_usd,
+                    "compression_generation": int(
+                        getattr(self, "compression_count", 0) or 0
+                    ),
+                },
             )
         except Exception:
             logger.debug("compression request usage recording failed", exc_info=True)
@@ -4806,6 +4822,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                     task="compression",
                     max_tokens=_LEAN_DIGEST_MAX_TOKENS,
                     **attempt_summary_route_kwargs(),
+                )
+                self._record_compression_request_usage(
+                    resp,
+                    provider=str(getattr(resp, "provider", "") or self.provider or ""),
+                    model=str(getattr(resp, "model", "") or self.summary_model or self.model or ""),
                 )
                 body = (
                     resp.choices[0].message.content
