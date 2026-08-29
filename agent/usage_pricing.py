@@ -148,7 +148,8 @@ class CostResult:
     fetched_at: Optional[datetime] = None
     pricing_version: Optional[str] = None
     notes: tuple[str, ...] = ()
-
+    input_cost_usd: Optional[Decimal] = None
+    output_cost_usd: Optional[Decimal] = None
 
 _UTC_NOW = lambda: datetime.now(timezone.utc)
 
@@ -1470,6 +1471,8 @@ def estimate_usage_cost(
 
     notes: list[str] = []
     amount = _ZERO
+    input_amount = _ZERO
+    output_amount = _ZERO
 
     # Whole-request context-tier selection (e.g. Gemini Pro >200k prompts):
     # once the prompt (input + cache read + cache write) exceeds the entry's
@@ -1513,13 +1516,14 @@ def estimate_usage_cost(
             )
 
     if input_rate is not None:
-        amount += Decimal(usage.input_tokens) * input_rate / _ONE_MILLION
+        input_amount += Decimal(usage.input_tokens) * input_rate / _ONE_MILLION
     if output_rate is not None:
-        amount += Decimal(usage.output_tokens) * output_rate / _ONE_MILLION
+        output_amount += Decimal(usage.output_tokens) * output_rate / _ONE_MILLION
     if cache_read_rate is not None:
-        amount += Decimal(usage.cache_read_tokens) * cache_read_rate / _ONE_MILLION
+        input_amount += Decimal(usage.cache_read_tokens) * cache_read_rate / _ONE_MILLION
     if entry.cache_write_cost_per_million is not None:
-        amount += Decimal(usage.cache_write_tokens) * entry.cache_write_cost_per_million / _ONE_MILLION
+        input_amount += Decimal(usage.cache_write_tokens) * entry.cache_write_cost_per_million / _ONE_MILLION
+    amount = input_amount + output_amount
     if entry.request_cost is not None and usage.request_count:
         amount += Decimal(usage.request_count) * entry.request_cost
 
@@ -1541,6 +1545,8 @@ def estimate_usage_cost(
         fetched_at=entry.fetched_at,
         pricing_version=entry.pricing_version,
         notes=tuple(notes),
+        input_cost_usd=input_amount,
+        output_cost_usd=output_amount,
     )
 
 

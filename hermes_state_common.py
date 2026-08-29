@@ -326,7 +326,7 @@ def _sql_session_last_active_by_id(session_id_expr: str) -> str:
     )
 
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 
 # FTS storage-layout version, tracked INDEPENDENTLY of SCHEMA_VERSION in the
@@ -475,6 +475,31 @@ CREATE TABLE IF NOT EXISTS session_model_usage (
     last_seen REAL,
     PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
 );
+
+CREATE TABLE IF NOT EXISTS request_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    timestamp REAL NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT 'normal',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+    input_cost_usd REAL,
+    output_cost_usd REAL,
+    total_cost_usd REAL,
+    compression_generation INTEGER NOT NULL DEFAULT 0,
+    event_type TEXT NOT NULL DEFAULT 'normal'
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_usage_session_timestamp
+    ON request_usage(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_request_usage_provider_model_timestamp
+    ON request_usage(provider, model, timestamp);
 
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,

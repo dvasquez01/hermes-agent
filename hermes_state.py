@@ -8786,7 +8786,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         groups: List[Tuple[Optional[tuple], str, Dict[str, Any]]] = []
         for session_id, kwargs in batch:
             key = None
-            if not kwargs.get("absolute"):
+            if not kwargs.get("absolute") and kwargs.get("request_usage") is None:
                 key = (session_id,) + tuple(
                     kwargs.get(f) for f in self._TOKEN_DELTA_ROUTE_FIELDS
                 )
@@ -8883,6 +8883,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         billing_mode: Optional[str] = None,
         api_call_count: int = 0,
         absolute: bool = False,
+        request_usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Update token counters and backfill model if not already set.
 
@@ -9031,7 +9032,42 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     cost_source=cost_source,
                     api_call_count=api_call_count,
                 )
+            if request_usage is not None:
+                self._record_request_usage(conn, session_id, request_usage)
         self._execute_write(_do)
+
+    def record_request_usage(self, session_id: str, **usage: Any) -> None:
+        """Append one numeric provider-response usage record."""
+        self._execute_write(
+            lambda conn: self._record_request_usage(conn, session_id, usage)
+        )
+
+    @staticmethod
+    def _record_request_usage(conn, session_id: str, usage: Dict[str, Any]) -> None:
+        task = usage.get("task") or "normal"
+        fields = (
+            "provider", "model", "prompt_tokens", "completion_tokens",
+            "reasoning_tokens", "cache_read_tokens", "cache_write_tokens",
+            "cache_miss_tokens", "input_cost_usd", "output_cost_usd",
+            "total_cost_usd", "compression_generation", "event_type",
+        )
+        values = [usage.get(name) for name in fields]
+        values[0] = values[0] or ""
+        values[1] = values[1] or ""
+        values[2:8] = [int(value or 0) for value in values[2:8]]
+        values[8:11] = [float(value) if value is not None else None for value in values[8:11]]
+        values[11] = int(values[11] or 0)
+        values[12] = values[12] or task
+        conn.execute(
+            "INSERT INTO request_usage "
+            "(session_id, timestamp, provider, model, task, prompt_tokens, "
+            "completion_tokens, reasoning_tokens, cache_read_tokens, "
+            "cache_write_tokens, cache_miss_tokens, input_cost_usd, "
+            "output_cost_usd, total_cost_usd, compression_generation, event_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, usage.get("timestamp", time.time()), values[0], values[1],
+             task, *values[2:]),
+        )
 
     def _record_model_usage(
         self,
@@ -9161,6 +9197,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         reasoning_tokens: int = 0,
         estimated_cost_usd: Optional[float] = None,
         api_call_count: int = 1,
+        request_usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record an auxiliary LLM call's usage against *session_id* (issue #23270).
 
@@ -9210,6 +9247,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 ),
                 task=task,
             )
+            if request_usage is not None:
+                self._record_request_usage(conn, session_id, request_usage)
         self._execute_write(_do)
 
     def prune_empty_ghost_sessions(self, sessions_dir: "Optional[Path]" = None) -> int:
