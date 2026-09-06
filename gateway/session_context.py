@@ -96,6 +96,17 @@ _SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
 # precise return address so a stale/rotated durable session key cannot be
 # consumed by whichever desktop poller wakes first.
 _SESSION_UI_SESSION_ID: ContextVar = ContextVar("HERMES_UI_SESSION_ID", default=_UNSET)
+# Canonical LOGICAL conversation identity — the fork-aware compression-
+# lineage ROOT of the current physical session_id (resolved via
+# SessionDB.get_compression_lineage; see agent/prompt_cache_scope).
+# Lifecycle: stable across ordinary turns and across technical compression
+# splits (in-place OR rotation — the ROOT is rotation-invariant); a NEW
+# value on genuine conversation boundaries (/new, /reset, /branch, switch/
+# resume, exhausted- or recovery-reset) because those start a new lineage.
+# Published EXCLUSIVELY by trusted Hermes runtime code (per-turn prologue);
+# never supplied by a model, tool argument, or user text. Absent/empty =>
+# consumers must treat the conversation as sessionless (fail-closed).
+_SESSION_CONVERSATION_ID: ContextVar = ContextVar("HERMES_CONVERSATION_ID", default=_UNSET)
 # ID of the message that triggered the current turn. Used as a reply anchor
 # so background-process notifications stay inside the originating Telegram
 # private-chat topic (those lanes route only with thread id + reply anchor).
@@ -148,6 +159,7 @@ _VAR_MAP = {
     "HERMES_SESSION_SCOPE_ID": _SESSION_SCOPE_ID,
     "HERMES_SESSION_KEY": _SESSION_KEY,
     "HERMES_SESSION_ID": _SESSION_ID,
+    "HERMES_CONVERSATION_ID": _SESSION_CONVERSATION_ID,
     "HERMES_UI_SESSION_ID": _SESSION_UI_SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_PROFILE": _SESSION_PROFILE,
@@ -226,6 +238,7 @@ def set_session_vars(
     scope_id: str = "",
     session_key: str = "",
     session_id: str = "",
+    conversation_id: str = "",
     message_id: str = "",
     profile: str = "",
     cwd: str = "",
@@ -270,6 +283,7 @@ def set_session_vars(
         _SESSION_SCOPE_ID.set(scope_id),
         _SESSION_KEY.set(session_key),
         _SESSION_ID.set(session_id),
+        _SESSION_CONVERSATION_ID.set(conversation_id),
         _SESSION_UI_SESSION_ID.set(ui_session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_PROFILE.set(profile),
@@ -309,6 +323,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_SCOPE_ID,
         _SESSION_KEY,
         _SESSION_ID,
+        _SESSION_CONVERSATION_ID,
         _SESSION_UI_SESSION_ID,
         _SESSION_MESSAGE_ID,
         _SESSION_PROFILE,
