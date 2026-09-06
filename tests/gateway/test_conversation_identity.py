@@ -23,7 +23,6 @@ Lifecycle contracts exercised below (production revision audited):
 import asyncio
 import os
 import sys
-import threading
 from pathlib import Path
 
 import pytest
@@ -323,8 +322,28 @@ def test_cid12_child_subprocess_env_exact_current_value():
 
 
 def test_cid13_two_sessions_concurrent_no_contamination():
-    """Two bound tasks resolve + publish independently; each sees its own
-    conversation id (task-local ContextVar semantics)."""
+    """Two session tasks OVERLAP on ONE event loop; each sees its own
+    conversation id in BOTH the ContextVar accessor (``get_session_env``)
+    and the child env from the normal local subprocess-env builder
+    (``tools.environments.local._make_run_env``).
+
+    Deterministic adversarial overlap — asyncio.Event barriers, no sleeps
+    as the synchronization mechanism:
+
+    * Task A binds/publishes rootA, signals ``A_BOUND``, then BLOCKS on
+      ``B_BOUND``. Task B (started by the same ``asyncio.gather``) waits
+      for ``A_BOUND`` first, so its bind strictly OVERWRITES any shared
+      global state AFTER A bound; B publishes rootZ (physical segZ), then
+      signals ``B_BOUND`` and cooperatively yields.
+    * A resumes while B is still bound-but-suspended inside its critical
+      section and asserts A's OWN values — under a last-writer-wins /
+      os.environ implementation A would observe B's rootZ/segZ here and
+      fail. B then asserts its own values after A has run.
+
+    Both tasks are alive simultaneously throughout (gather + event
+    rendezvous), which the old sequential ``asyncio.run`` x2 version could
+    never prove.
+    """
     from hermes_state import SessionDB
     import tempfile
 
@@ -332,19 +351,127 @@ def test_cid13_two_sessions_concurrent_no_contamination():
         db = SessionDB(Path(d) / "state.db")
         db.create_session("rootA", **SESSION_DB_KWARGS)
         db.create_session("rootZ", **SESSION_DB_KWARGS)
-        _rotate(db, "rootZ", "segZ")
+        _rotate(db, "rootZ", "segZ")  # physical segZ -> logical rootZ
 
-        async def worker(agent_sid, expect):
-            async def run():
-                reset_session_vars()
-                set_session_vars(session_key=f"k-{agent_sid}", session_id=agent_sid)
-                _publish(_Agent(agent_sid, db))
-                await asyncio.sleep(0)  # interleave tasks
-                assert get_session_env(CONVERSATION_ENV) == expect
-            return await asyncio.create_task(run())
+        async def task_a(ev_a_bound, ev_b_bound):
+            reset_session_vars()
+            set_session_vars(session_key="k-rootA", session_id="rootA")
+            _publish(_Agent("rootA", db))  # canonical root of lineage rootA
+            ev_a_bound.set()
+            # B binds strictly after A: any shared/global writer would have
+            # overwritten A's values by the time A resumes.
+            await ev_b_bound.wait()
+            # ── A asserts while B is still bound inside its section ──
+            assert get_session_env(CONVERSATION_ENV) == "rootA"
+            assert get_session_env("HERMES_SESSION_ID") == "rootA"
+            env_a = _make_run_env({})
+            assert env_a[CONVERSATION_ENV] == "rootA"
+            assert env_a["HERMES_SESSION_ID"] == "rootA"
 
-        asyncio.run(worker("rootA", "rootA"))
-        asyncio.run(worker("segZ", "rootZ"))
+        async def task_b(ev_a_bound, ev_b_bound):
+            await ev_a_bound.wait()  # A has already bound + published rootA
+            reset_session_vars()
+            set_session_vars(session_key="k-segZ", session_id="segZ")
+            _publish(_Agent("segZ", db))  # lineage segZ -> canonical rootZ
+            ev_b_bound.set()
+            await asyncio.sleep(0)  # cooperative yield: let A run mid-overlap
+            assert get_session_env(CONVERSATION_ENV) == "rootZ"
+            assert get_session_env("HERMES_SESSION_ID") == "segZ"
+            env_b = _make_run_env({})
+            assert env_b[CONVERSATION_ENV] == "rootZ"
+            assert env_b["HERMES_SESSION_ID"] == "segZ"
+
+        async def main():
+            ev_a_bound, ev_b_bound = asyncio.Event(), asyncio.Event()
+            await asyncio.gather(
+                task_a(ev_a_bound, ev_b_bound),
+                task_b(ev_a_bound, ev_b_bound),
+            )
+
+        asyncio.run(main())
+
+
+def test_turn_prologue_publication_integration_fresh_session(tmp_path):
+    """R3A.1 E — the PRODUCTION publication site (the hook added to
+    ``agent/turn_context.build_turn_context``), not the publish helper alone.
+
+    Required invariant, exercised through the real relevant turn setup path:
+
+        fresh session -> REAL SessionDB row establishment (the agent's own
+        ``_ensure_db_session`` inside the prologue) -> production turn-context
+        publication -> HERMES_CONVERSATION_ID == canonical root -> child
+        subprocess env (production local builder) carries the same root.
+
+    A real ``AIAgent`` on a TEMPORARY SessionDB goes through the actual
+    ``build_turn_context`` prologue; only the loop-injected callables that
+    are irrelevant to row establishment + publication are stubbed. Temporary
+    HERMES_HOME / temporary SessionDB — no live runtime, no network.
+    """
+    import types
+    from unittest.mock import patch
+
+    from agent.turn_context import build_turn_context
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    db = SessionDB(tmp_path / "state.db")
+    fresh_sid = "cidE-fresh-turn-session"
+    assert db.get_session(fresh_sid) is None  # genuinely fresh: no row yet
+
+    with patch.dict(
+        os.environ,
+        {"OPENROUTER_API_KEY": "test-key", "HERMES_HOME": str(tmp_path / "home")},
+    ):
+        (tmp_path / "home").mkdir(exist_ok=True)
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            session_db=db,
+            session_id=fresh_sid,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    # Keep the prologue narrow: compression machinery stays off so the
+    # publication site (which runs before idle/preflight compression) is
+    # what this test exercises.
+    agent.compression_enabled = False
+    agent._cached_system_prompt = "SYSTEM"
+
+    build_turn_context(
+        agent=agent,
+        user_message="hello",
+        system_message=None,
+        conversation_history=None,
+        task_id=None,
+        stream_callback=None,
+        persist_user_message=None,
+        restore_or_build_system_prompt=lambda *a, **k: None,
+        install_safe_stdio=lambda: None,
+        sanitize_surrogates=lambda s: s,
+        summarize_user_message_for_log=lambda s: s,
+        set_session_context=lambda _sid: None,
+        set_current_write_origin=lambda _o: None,
+        ra=lambda: types.SimpleNamespace(_set_interrupt=lambda *a, **k: None),
+    )
+
+    # 1) Real SessionDB row establishment happened inside the prologue.
+    row = db.get_session(fresh_sid)
+    assert row is not None, "the turn prologue must establish the real session row"
+    # 2) Canonical root of a fresh (parentless) lineage is its own row id.
+    from agent.conversation_identity import resolve_conversation_identity
+
+    root = resolve_conversation_identity(fresh_sid, db)
+    assert root == fresh_sid
+    # 3) The prologue's publication reached the task-local ContextVar...
+    assert get_session_env(CONVERSATION_ENV) == root
+    assert get_session_env("HERMES_SESSION_ID") == fresh_sid
+    # 4) ...and the child subprocess env built by the production local
+    #    subprocess-env builder carries the same canonical root.
+    env = _make_run_env({})
+    assert env[CONVERSATION_ENV] == root
+    assert env["HERMES_SESSION_ID"] == fresh_sid
 
 
 def test_cid14_clear_and_reset_mask_conversation_id():

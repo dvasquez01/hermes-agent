@@ -30,9 +30,13 @@ Lifecycle (what the value guarantees to consumers):
   fail closed (operate sessionless).
 
 Publication is exclusively runtime-internal (the per-turn prologue in
-``agent/turn_context`` and the compression-rotation re-sync). No tool, CLI
-argument, model output, or user text may set it. Task-local ContextVar
-mechanics (and the subprocess-env bridge) live in
+``agent/turn_context``). The compression-rotation path needs no re-sync:
+the ROOT is rotation-invariant, so the prologue binding is already the
+post-rotation value, and ContextVar thread/task locality would drop any
+worker-thread write anyway (see the R3A.1 integration test in
+``tests/agent/test_conversation_identity_rotation_integration.py``). No
+tool, CLI argument, model output, or user text may set it. Task-local
+ContextVar mechanics (and the subprocess-env bridge) live in
 ``gateway/session_context``: once the session machinery is engaged, a child
 process only ever sees the value bound for THIS task.
 """
@@ -107,10 +111,9 @@ def publish_conversation_identity_for_agent(agent: Any) -> str:
     """Resolve (strictly) and publish *agent*'s conversation identity.
 
     Called from the per-turn prologue once the session row is guaranteed
-    persisted, and from the compression-rotation re-sync. Never raises: a
-    resolution problem can only mean an EMPTY (sessionless) identity, which
-    is the fail-closed outcome. Returns the published value for tests and
-    callers that want it.
+    persisted. Never raises: a resolution problem can only mean an EMPTY
+    (sessionless) identity, which is the fail-closed outcome. Returns the
+    published value for tests and callers that want it.
     """
     sid = str(getattr(agent, "session_id", None) or "")
     db = getattr(agent, "_session_db", None)
