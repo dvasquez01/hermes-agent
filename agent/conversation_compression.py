@@ -3599,6 +3599,24 @@ def compress_context(
                         set_current_session_id(agent.session_id)
                     except Exception:
                         os.environ["HERMES_SESSION_ID"] = agent.session_id
+                    # Rotation re-mints the PHYSICAL segment id; the logical
+                    # conversation identity is the (unchanged) lineage root.
+                    # Re-publish it here so subprocesses spawned later in THIS
+                    # turn — before the next turn prologue re-runs the walk —
+                    # bind the authoritative value instead of inheriting the
+                    # pre-rotation context binding across the split.
+                    try:
+                        from agent.conversation_identity import (
+                            publish_conversation_identity_for_agent,
+                        )
+
+                        publish_conversation_identity_for_agent(agent)
+                    except Exception:
+                        logger.debug(
+                            "conversation identity re-sync after compression "
+                            "rotation failed",
+                            exc_info=True,
+                        )
                     try:
                         from hermes_logging import set_session_context
 

@@ -770,6 +770,22 @@ def build_turn_context(
         if not isinstance(pending_cli_message, dict) or pending_cli_message.get("_db_persisted"):
             agent._pending_cli_user_message = None
 
+    # Publish the canonical LOGICAL conversation identity for this turn
+    # (fork-aware compression-lineage ROOT; strict: an unresolvable lineage
+    # publishes EMPTY — never the physical id, so consumers fail closed
+    # sessionless). Runs after _ensure_db_session above, so a fresh row
+    # exists when the walk happens, and before preflight compression: a
+    # later in-turn ROTATION only re-mints the physical segment id, so it
+    # is harmless — the ROOT is rotation-invariant (see
+    # agent/conversation_identity). The compression-rotation path re-syncs
+    # it explicitly for mid-turn subprocess spawns.
+    try:
+        from agent.conversation_identity import publish_conversation_identity_for_agent
+
+        publish_conversation_identity_for_agent(agent)
+    except Exception:
+        logger.debug("conversation identity publish failed", exc_info=True)
+
     # ── Idle-triggered compaction (opt-in; ``idle_compact_after_seconds``) ──
     # When a session resumes after a long idle gap, compact the accumulated
     # history up front so the rest of the conversation does not keep re-reading

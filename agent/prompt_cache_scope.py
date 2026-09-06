@@ -108,6 +108,30 @@ def resolve_prompt_cache_scope(agent: Any) -> str:
     return scope
 
 
+def resolve_prompt_cache_scope_strict(agent: Any) -> Optional[str]:
+    """Return the authoritative compression-lineage ROOT, or None.
+
+    Same fork-aware walker as :func:`resolve_prompt_cache_scope` (via
+    :func:`_lineage_root`), WITHOUT the degraded "fall back to the physical
+    session id" behavior. Consumers of a *canonical conversation identity*
+    must be able to distinguish "root resolved" from "could not resolve";
+    the legacy cache-scope fallback would silently launder a rotating
+    physical id into an authoritative-looking value (a transient DB failure
+    or a not-yet-persisted row must never do that). Returns None when the
+    agent has no session id, no DB handle, the row is missing, or the walk
+    fails. Never raises.
+    """
+    try:
+        sid = str(getattr(agent, "session_id", None) or "")
+        if not sid:
+            return None
+        db = getattr(agent, "_session_db", None)
+        return _lineage_root(sid, db)
+    except Exception:
+        logger.debug("strict conversation root resolution failed", exc_info=True)
+        return None
+
+
 def resolve_prompt_cache_scope_safe(agent: Any) -> Optional[str]:
     """Never-raising variant of :func:`resolve_prompt_cache_scope`.
 
