@@ -17641,6 +17641,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
 
+        # ── Captura conversacional (adapter memory-core) ──────────────────
+        # POST-AUTH y PRE-AGENTE: ruta explícita "captura …" o conversación
+        # con captura ACTIVA. El adapter decide: off_flow → el dispatch
+        # ordinario continúa (cero efectos de captura); ok → su respuesta se
+        # devuelve por la superficie normal. Errores del puente → respuesta
+        # sanitizada SIN reenviar al agente (sin doble ruta con efectos).
+        if not is_internal and not event.is_command():
+            try:
+                from gateway.capture_bridge import (
+                    CaptureBridgeFailure,
+                    handle_capture_message,
+                    maybe_sanitized_failure_message,
+                )
+
+                _capture_reply = await handle_capture_message(
+                    self,
+                    source=source,
+                    text=event.text,
+                    message_id=event.message_id or getattr(
+                        source, "message_id", None),
+                )
+                if _capture_reply is not None:
+                    return _capture_reply
+            except CaptureBridgeFailure as _capture_exc:
+                logger.warning("capture bridge failed: %s", _capture_exc)
+                return maybe_sanitized_failure_message(_capture_exc)
+
         # Global emergency stop (`hermes pause`): give new turns a brief
         # paused notice instead of starting an agent run. Internal events
         # (background-process completions from IN-FLIGHT work) bypass the
