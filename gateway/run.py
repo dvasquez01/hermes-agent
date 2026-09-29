@@ -16420,36 +16420,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
 
-        # ── Captura conversacional (adapter memory-core, base R3A) ─────────
-        # POST-AUTH y PRE-AGENTE: ruta explícita "captura …" o conversación
-        # con captura ACTIVA. Identidad LÓGICA canónica R3A (estricta): sin
-        # identidad resoluble NADA se asume (fail-closed; la clave de sesión
-        # física jamás se sustituye). El adapter decide: off_flow → el
-        # dispatch ordinario continúa (cero efectos de captura); ok → su
-        # respuesta se devuelve por la superficie normal. Errores del puente
-        # → respuesta sanitizada SIN reenviar al agente (sin doble ruta con
-        # efectos).
-        if not is_internal and not event.is_command():
-            try:
-                from gateway.capture_bridge import (
-                    CaptureBridgeFailure,
-                    handle_capture_message,
-                    maybe_sanitized_failure_message,
-                )
-
-                _capture_reply = await handle_capture_message(
-                    self,
-                    source=source,
-                    text=event.text,
-                    message_id=event.message_id or getattr(
-                        source, "message_id", None),
-                )
-                if _capture_reply is not None:
-                    return _capture_reply
-            except CaptureBridgeFailure as _capture_exc:
-                logger.warning("capture bridge failed: %s", _capture_exc)
-                return maybe_sanitized_failure_message(_capture_exc)
-
         # Global emergency stop (`hermes pause`): give new turns a brief
         # paused notice instead of starting an agent run. Internal events
         # (background-process completions from IN-FLIGHT work) bypass the
@@ -16733,6 +16703,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # the confirm doesn't block normal usage indefinitely.  The user
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
+
+        # ── Captura conversacional (adapter memory-core, base R3A) ─────────
+        # Punto de inserción: DESPUÉS de auth, pausa y de los interceptores
+        # de trabajo en curso (update prompt / clarify / slash-confirm), y
+        # ANTES del manejo de prioridad con agente en marcha: en pausa no se
+        # inicia captura y las respuestas a trabajo en curso no se consumen
+        # como captura. Identidad LÓGICA canónica R3A estricta (cadena
+        # SessionStore→SessionDB; sin inventar sesiones y sin fallback a la
+        # clave de routing). El adapter decide: off_flow → el dispatch
+        # ordinario continúa (cero efectos de captura); ok → su respuesta se
+        # devuelve por la superficie normal. Errores del puente → respuesta
+        # sanitizada SIN reenviar al agente (sin doble ruta con efectos).
+        if (
+            not is_internal
+            and not event.is_command()
+            and not self._is_session_running(_quick_key)
+            and not _tool_approval_live
+            and _pending_confirm is None
+            and _pending_clarify is None
+            and not getattr(
+                getattr(_up_state, "persistent", None),
+                "update_prompt_pending", False,
+            )
+        ):
+            try:
+                from gateway.capture_bridge import (
+                    CaptureBridgeFailure,
+                    handle_capture_message,
+                    maybe_sanitized_failure_message,
+                )
+
+                _capture_reply = await handle_capture_message(
+                    self,
+                    source=source,
+                    text=event.text,
+                    message_id=event.message_id or getattr(
+                        source, "message_id", None),
+                )
+                if _capture_reply is not None:
+                    return _capture_reply
+            except CaptureBridgeFailure as _capture_exc:
+                logger.warning("capture bridge failed: %s", _capture_exc)
+                return maybe_sanitized_failure_message(_capture_exc)
 
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
